@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # 手动触发：只构建并上传 Actions 产物，不创建 Release
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-amd64:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          } else {
+            $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
+            throw "Invalid version '$version', expected a tag like v1.2.3 or v1.2.3-beta.1"
+          }
+          # MSI (WiX) 不支持非数字的预发布版本号，预发布只出 NSIS 安装包
+          $prerelease = $version.Contains('-')
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$($prerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Write-Host "version=$version prerelease=$prerelease"
+
+      - name: Set app version
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node -e "const fs=require('fs');const f='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(f,'utf8'));c.version=process.env.VERSION;fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        shell: pwsh
+        run: |
+          if ("${{ steps.version.outputs.prerelease }}" -eq "true") {
+            pnpm tauri build --bundles nsis
+          } else {
+            pnpm tauri build
+          }
+
+      - name: Collect packages
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $out = "release"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $bundle = "src-tauri/target/release/bundle"
+          $name = "wsl-manager_${env:VERSION}_windows-amd64"
+
+          Copy-Item (Get-ChildItem "$bundle/nsis/*-setup.exe" | Select-Object -First 1) "$out/$name-setup.exe"
+          $msi = Get-ChildItem "$bundle/msi/*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($msi) { Copy-Item $msi "$out/$name.msi" }
+          Copy-Item "src-tauri/target/release/wsl-manager.exe" "$out/$name-portable.exe"
+
+          Get-ChildItem $out -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$out/SHA256SUMS.txt" -Encoding utf8NoBOM
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wsl-manager_${{ steps.version.outputs.version }}_windows-amd64
+          path: release/*
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $files = (Get-ChildItem release -File).FullName
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # 重新运行时覆盖已上传的文件
+            gh release upload $tag $files --clobber
+          } else {
+            $notes = @"
+          ## 下载
+
+          | 文件 | 说明 |
+          |---|---|
+          | ``*_windows-amd64-setup.exe`` | 安装包（推荐） |
+          | ``*_windows-amd64.msi`` | MSI 安装包，适合批量部署（预发布版本不提供） |
+          | ``*_windows-amd64-portable.exe`` | 免安装单文件，需要系统已有 WebView2 运行时（Windows 10/11 通常已内置） |
+
+          运行环境：Windows 10/11 x64，已启用 WSL2。
+          "@
+            $flags = @()
+            if ("${{ steps.version.outputs.prerelease }}" -eq "true") { $flags += "--prerelease" }
+            gh release create $tag $files --title "WSL Manager $tag" --notes $notes --generate-notes @flags
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

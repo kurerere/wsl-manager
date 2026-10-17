@@ -11,6 +11,10 @@
 
 ![截图](docs/screenshot.png)
 
+## 下载
+
+到 [Releases](https://github.com/kurerere/wsl-manager/releases) 下载 Windows x64 版本：安装包 `*-setup.exe` / `*.msi`，或免安装的 `*-portable.exe`。
+
 ## 为什么做这个
 
 WSL2 的所有发行版都跑在同一个虚拟机里。在任务管理器里只能看到一个 `vmmem` / `vmmemWSL` 进程吃掉了一大块内存，
@@ -64,6 +68,19 @@ pnpm tauri dev                 # 开发模式
 pnpm tauri build               # 打包安装程序（MSI / NSIS）
 pnpm tauri build --no-bundle   # 只生成 exe：src-tauri/target/release/wsl-manager.exe
 ```
+
+## 发布
+
+推送 `v*` 格式的 tag 即触发 GitHub Actions（`.github/workflows/release.yml`），自动构建 windows-amd64 安装包并创建 Release，
+应用版本号取自 tag（无需手动修改 `tauri.conf.json`）：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`v1.2.3-beta.1` 这类预发布 tag 会标记为 Pre-release，且只提供 NSIS 安装包（MSI 不支持非数字预发布版本号）。
+在 Actions 页面手动运行该工作流则只构建并上传产物，不创建 Release。
 
 修改图标：编辑 `app-icon.svg` 后运行 `pnpm tauri icon app-icon.svg`。
 
