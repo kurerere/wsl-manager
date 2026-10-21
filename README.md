@@ -95,3 +95,10 @@ src/components/charts.tsx            趋势图、VHDX 条形图（Recharts）
 src/components/distro-card.tsx       发行版卡片
 src/lib/history.ts                   趋势历史数据与配色分配
 ```
+
+## 许可证
+
+原创代码采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 kurerere。
+
+第三方代码、素材和依赖保留各自的版权和许可条款，详见
+[第三方声明](THIRD_PARTY_NOTICES.md)。
