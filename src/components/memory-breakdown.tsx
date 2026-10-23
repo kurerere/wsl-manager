@@ -1,10 +1,8 @@
-import { useState } from "react";
-import { Eraser, Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { CacheControls } from "@/components/cache-controls";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { seriesColor } from "@/lib/history";
-import { api, formatBytes, percent, type Distro, type VmStats } from "@/lib/wsl";
+import { formatBytes, percent, type Distro, type VmStats } from "@/lib/wsl";
 
 interface Segment {
   key: string;
@@ -19,13 +17,10 @@ interface MemoryBreakdownProps {
   distros: Distro[];
   slots: Map<string, number>;
   onChanged: () => void;
-  onError: (message: string) => void;
 }
 
 /** WSL 虚拟机内存的组成：各发行版私有内存 + 页缓存 + 内核及其他 + 空闲 */
-export function MemoryBreakdown({ vm, distros, slots, onChanged, onError }: MemoryBreakdownProps) {
-  const [busy, setBusy] = useState(false);
-
+export function MemoryBreakdown({ vm, distros, slots, onChanged }: MemoryBreakdownProps) {
   const distroSegments: Segment[] = distros
     .filter((d) => d.stats)
     .map((d) => ({
@@ -57,38 +52,16 @@ export function MemoryBreakdown({ vm, distros, slots, onChanged, onError }: Memo
   ];
   const free: Segment = { key: "free", label: "空闲", bytes: vm.memFree, color: "var(--muted)" };
 
-  const dropCaches = async () => {
-    setBusy(true);
-    try {
-      await api.dropCaches();
-      onChanged();
-    } catch (e) {
-      onError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <Card className="gap-5">
-      <CardHeader>
+      <CardHeader className="grid-cols-1! lg:grid-cols-[minmax(0,1fr)_auto]!">
         <CardTitle className="text-sm">内存分布</CardTitle>
         <CardDescription>
           WSL 虚拟机已占用 {formatBytes(used)} / {formatBytes(vm.memTotal)}，其中发行版私有内存{" "}
           {formatBytes(distroTotal)}
         </CardDescription>
-        <CardAction>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button variant="outline" size="sm" onClick={dropCaches} disabled={busy}>
-                {busy ? <Loader2 className="animate-spin" /> : <Eraser />}
-                释放缓存
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="max-w-64">
-              清空 Linux 页缓存（drop_caches），释放出的内存会归还给 Windows。不影响正在运行的程序，之后读文件会稍慢一些。
-            </TooltipContent>
-          </Tooltip>
+        <CardAction className="col-start-1 row-span-1 row-start-3 w-full lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:w-auto">
+          <CacheControls onChanged={onChanged} />
         </CardAction>
       </CardHeader>
 

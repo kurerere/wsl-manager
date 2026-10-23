@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { TrendChart, VhdxChart, type Series } from "@/components/charts";
 import { DistroCard } from "@/components/distro-card";
+import { CacheControls } from "@/components/cache-controls";
 import { MemoryBreakdown } from "@/components/memory-breakdown";
 import { Metric } from "@/components/metric";
 import { appendSample, emptyHistory, seriesColor, seriesKey, VM_KEY, type History } from "@/lib/history";
@@ -170,13 +171,23 @@ export default function App() {
           </SummaryCard>
         </section>
 
+        {!vm && (
+          <Card>
+            <CardContent className="flex flex-wrap items-center justify-between gap-4">
+              <p className="text-sm text-muted-foreground">
+                {data ? "没有运行中的 WSL 虚拟机" : "正在读取 WSL 状态…"}
+              </p>
+              <CacheControls onChanged={refresh} />
+            </CardContent>
+          </Card>
+        )}
+
         {vm && (
           <MemoryBreakdown
             vm={vm}
             distros={distros}
             slots={slots.current}
             onChanged={refresh}
-            onError={setError}
           />
         )}
 

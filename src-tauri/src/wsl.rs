@@ -195,7 +195,7 @@ fn list_entries() -> Vec<ListEntry> {
     Vec::new()
 }
 
-fn running_set() -> HashSet<String> {
+pub(crate) fn running_set() -> HashSet<String> {
     // 没有运行中的发行版时 wsl.exe 返回非零退出码
     run_wsl(&["--list", "--running", "--quiet"])
         .map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())

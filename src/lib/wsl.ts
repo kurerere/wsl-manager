@@ -42,10 +42,21 @@ export interface Overview {
   host: HostMemory | null;
 }
 
+export interface CacheSchedule {
+  minutes: number;
+  remaining: number;
+  busy: boolean;
+  waiting: boolean;
+  completed: number;
+  error: string | null;
+}
+
 export const api = {
   overview: () => invoke<Overview>("get_overview"),
   terminate: (name: string) => invoke<void>("terminate_distro", { name }),
   dropCaches: () => invoke<void>("drop_caches"),
+  cacheSchedule: () => invoke<CacheSchedule>("get_cache_schedule"),
+  setCacheSchedule: (minutes: number) => invoke<CacheSchedule>("set_cache_schedule", { minutes }),
   shutdown: () => invoke<void>("shutdown_wsl"),
   setDefault: (name: string) => invoke<void>("set_default_distro", { name }),
   openTerminal: (name: string) => invoke<void>("open_terminal", { name }),
