@@ -212,6 +212,35 @@ fn compact_blocker_for_path(_name: &str, _path: &str) -> Option<String> {
     None
 }
 
+#[cfg(windows)]
+fn allocated_size(path: &str) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, SetLastError},
+        Storage::FileSystem::{GetCompressedFileSizeW, INVALID_FILE_SIZE},
+    };
+
+    let path: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(Some(0)).collect();
+    let mut high = 0;
+    unsafe {
+        SetLastError(0);
+        let low = GetCompressedFileSizeW(path.as_ptr(), &mut high);
+        if low == INVALID_FILE_SIZE && GetLastError() != 0 {
+            return None;
+        }
+        Some((u64::from(high) << 32) | u64::from(low))
+    }
+}
+
+#[cfg(not(windows))]
+fn allocated_size(_path: &str) -> Option<u64> {
+    None
+}
+
+fn vhdx_usage(path: &str, metadata: &std::fs::Metadata) -> u64 {
+    allocated_size(path).unwrap_or(metadata.len())
+}
+
 struct ListEntry {
     name: String,
     version: u8,
@@ -631,7 +660,8 @@ pub fn overview() -> Result<Overview, String> {
                 .vhdx_path
                 .as_ref()
                 .and_then(|path| std::fs::metadata(path).ok());
-            let vhdx_size = metadata.as_ref().map(|metadata| metadata.len());
+            let vhdx_size = e.vhdx_path.as_ref().zip(metadata.as_ref())
+                .map(|(path, metadata)| vhdx_usage(path, metadata));
             let compact_blocker = metadata
                 .as_ref()
                 .and_then(|metadata| compact_blocker_from_metadata(&e.name, metadata));
@@ -698,7 +728,9 @@ pub fn compact(name: &str) -> Result<CompactResult, String> {
     if !compact_supported() {
         return Err("压缩磁盘需要 WSL 3.0.1 或更高版本，请先运行 wsl --update".into());
     }
-    let before = std::fs::metadata(&path).map_err(|e| format!("读取 VHDX 文件大小失败：{e}"))?.len();
+    let before_metadata =
+        std::fs::metadata(&path).map_err(|e| format!("读取 VHDX 文件大小失败：{e}"))?;
+    let before = vhdx_usage(&path, &before_metadata);
 
     if running_set().contains(name) {
         SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
@@ -716,7 +748,9 @@ pub fn compact(name: &str) -> Result<CompactResult, String> {
     }
 
     run_wsl(&["--manage", name, "--compact"])?;
-    let after = std::fs::metadata(path).map_err(|e| format!("读取 VHDX 文件大小失败：{e}"))?.len();
+    let after_metadata =
+        std::fs::metadata(&path).map_err(|e| format!("读取 VHDX 文件大小失败：{e}"))?;
+    let after = vhdx_usage(&path, &after_metadata);
     Ok(CompactResult { before, after })
 }
 

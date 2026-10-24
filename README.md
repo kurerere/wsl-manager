@@ -47,7 +47,7 @@ WSL2 的所有发行版都跑在同一个虚拟机里。在任务管理器里只
 | 页缓存 | `/proc/meminfo` 中 `Buffers + Cached + SReclaimable` |
 | 内核及其他 | 虚拟机已用（`MemTotal − MemFree`）减去页缓存和各发行版私有内存，包含内核和 WSLg 系统发行版等 |
 | 磁盘 | 发行版内 `df /`，即 ext4.vhdx 文件系统的使用情况 |
-| VHDX 占用 | 从注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` 找到虚拟磁盘路径后读取文件大小 |
+| VHDX 占用 | 从注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` 找到虚拟磁盘路径后通过 `GetCompressedFileSizeW` 读取实际分配空间（稀疏/压缩文件按实际分配计算） |
 | Windows 内存 | `GlobalMemoryStatusEx`；WSL 占用按虚拟机 `MemTotal − MemFree` 估算 |
 
 WSL2 的发行版共享一个内核，但各自有独立的 PID 命名空间，所以 `/proc/stat`、`/proc/meminfo` 反映整个虚拟机，
