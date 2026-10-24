@@ -1,11 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export interface ProcessStat {
+  name: string;
+  cpuPercent: number;
+  /** 私有内存（RSS 减去共享/文件页） */
+  memUsed: number;
+  memRss: number;
+}
+
 export interface DistroStats {
   cpuPercent: number;
   /** 私有内存（RSS 减去共享/文件页） */
   memUsed: number;
   memRss: number;
   processCount: number;
+  /** 按私有内存降序的前 10 个进程 */
+  processes: ProcessStat[];
   diskTotal: number;
   diskUsed: number;
   diskAvail: number;

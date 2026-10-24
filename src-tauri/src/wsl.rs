@@ -42,9 +42,24 @@ pub struct DistroStats {
     /// 所有进程 RSS 之和，字节
     pub mem_rss: u64,
     pub process_count: u32,
+    /// 按私有内存降序的前 10 个进程
+    pub processes: Vec<ProcessStat>,
     pub disk_total: u64,
     pub disk_used: u64,
     pub disk_avail: u64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessStat {
+    /// /proc/<pid>/stat 的 comm 字段
+    pub name: String,
+    /// 占整个 WSL VM CPU 容量的百分比（两次刷新之间的平均值）
+    pub cpu_percent: f64,
+    /// 私有内存（RSS 减去共享/文件页），字节
+    pub mem_used: u64,
+    /// RSS，字节
+    pub mem_rss: u64,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -344,36 +359,43 @@ fn parse_cpu_line(line: &str) -> Option<(u64, u64)> {
     Some((nums.iter().sum(), nums[3] + nums[4]))
 }
 
-/// 解析 /proc/<pid>/stat，返回 pid -> utime + stime
-fn parse_procs(lines: &[&str]) -> HashMap<u32, u64> {
+/// 解析 /proc/<pid>/stat，返回 pid -> (comm, utime + stime)
+fn parse_procs(lines: &[&str]) -> HashMap<u32, (String, u64)> {
     let mut map = HashMap::new();
     for line in lines {
-        // comm 字段可能包含空格和括号，以最后一个 ')' 为界
+        // comm 字段可能包含空格和括号，以第一个 " (" 和最后一个 ')' 为界
         let (Some(open), Some(close)) = (line.find(" ("), line.rfind(')')) else { continue };
         let Ok(pid) = line[..open].trim().parse::<u32>() else { continue };
+        let comm = line[open + 2..close].to_string();
         let rest: Vec<&str> = line[close + 1..].split_whitespace().collect();
         // rest[0] 是第 3 个字段 (state)，utime/stime 分别是第 14/15 个字段
         if rest.len() < 13 {
             continue;
         }
         let num = |i: usize| rest[i].parse::<u64>().unwrap_or(0);
-        map.insert(pid, num(11) + num(12));
+        map.insert(pid, (comm, num(11) + num(12)));
     }
     map
 }
 
-/// 解析 `grep -H '' /proc/*/statm` 的输出，返回 (rss 页数, 私有页数) 之和
-fn parse_statm(lines: &[&str]) -> (u64, u64) {
+/// 解析 `grep -H '' /proc/*/statm` 的输出，返回 pid -> (rss 页数, 私有页数)
+fn parse_statm(lines: &[&str]) -> HashMap<u32, (u64, u64)> {
     lines
         .iter()
         .filter_map(|l| {
             // /proc/<pid>/statm:size resident shared text lib data dt
-            let mut f = l.split_once(':')?.1.split_whitespace().skip(1);
+            let (path, rest) = l.split_once(':')?;
+            let pid = path
+                .trim_start_matches("/proc/")
+                .trim_end_matches("/statm")
+                .parse::<u32>()
+                .ok()?;
+            let mut f = rest.split_whitespace().skip(1);
             let resident: u64 = f.next()?.parse().ok()?;
             let shared: u64 = f.next()?.parse().ok()?;
-            Some((resident, resident.saturating_sub(shared)))
+            Some((pid, (resident, resident.saturating_sub(shared))))
         })
-        .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+        .collect()
 }
 
 fn meminfo_kb(lines: &[&str], key: &str) -> u64 {
@@ -384,12 +406,22 @@ fn meminfo_kb(lines: &[&str], key: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// 单个进程的一次采样
+struct ProcSample {
+    /// /proc/<pid>/stat 的 comm 字段
+    comm: String,
+    /// utime + stime jiffies
+    jiff: u64,
+    private_pages: u64,
+    rss_pages: u64,
+}
+
 /// 一次采样的原始数据
 struct Snapshot {
     cpu_total: u64,
     cpu_idle: u64,
-    procs: HashMap<u32, u64>,
-    /// (rss 页数, 私有页数)
+    procs: HashMap<u32, ProcSample>,
+    /// 所有进程 (rss 页数, 私有页数) 之和
     statm: (u64, u64),
     mem_total: u64,
     mem_available: u64,
@@ -417,11 +449,21 @@ fn parse_snapshot(lines: &[String]) -> Result<Snapshot, String> {
             .unwrap_or(0)
             * 1024
     };
+    let statm = parse_statm(get("STATM"));
+    // 总和覆盖所有 statm 行（含已退出、没有对应 stat 行的 pid），口径与进程列表无关
+    let statm_sum = statm.values().fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    let procs = parse_procs(get("PROC"))
+        .into_iter()
+        .map(|(pid, (comm, jiff))| {
+            let (rss_pages, private_pages) = statm.get(&pid).copied().unwrap_or_default();
+            (pid, ProcSample { comm, jiff, private_pages, rss_pages })
+        })
+        .collect();
     Ok(Snapshot {
         cpu_total,
         cpu_idle,
-        procs: parse_procs(get("PROC")),
-        statm: parse_statm(get("STATM")),
+        procs,
+        statm: statm_sum,
         mem_total: meminfo_kb(mem, "MemTotal") * 1024,
         mem_available: meminfo_kb(mem, "MemAvailable") * 1024,
         mem_free: meminfo_kb(mem, "MemFree") * 1024,
@@ -467,22 +509,24 @@ pub fn sample_vm_once() -> Option<VmSample> {
     Some(sample)
 }
 
+/// 单个进程两次快照间的 jiffies 增量；新进程没有上次的值，按其全部 CPU 时间计入
+fn jiff_delta(pid: u32, cur: &ProcSample, prev: &Snapshot) -> u64 {
+    cur.jiff
+        .saturating_sub(prev.procs.get(&pid).map_or(0, |p| p.jiff))
+}
+
 /// 由前后两次快照计算统计数据
 fn compute(prev: &Snapshot, cur: &Snapshot, cores: u32, page_size: u64) -> (DistroStats, VmStats) {
     let dt = cur.cpu_total.saturating_sub(prev.cpu_total).max(1) as f64;
     let idle = cur.cpu_idle.saturating_sub(prev.cpu_idle) as f64;
-    // 期间新启动的进程没有上次的值，按其全部 CPU 时间计入
-    let busy: u64 = cur
-        .procs
-        .iter()
-        .map(|(pid, t)| t.saturating_sub(prev.procs.get(pid).copied().unwrap_or(0)))
-        .sum();
+    let busy: u64 = cur.procs.iter().map(|(pid, p)| jiff_delta(*pid, p, prev)).sum();
     (
         DistroStats {
             cpu_percent: (busy as f64 / dt * 100.0).clamp(0.0, 100.0),
             mem_used: cur.statm.1 * page_size,
             mem_rss: cur.statm.0 * page_size,
             process_count: cur.procs.len() as u32,
+            processes: top_processes(prev, cur, dt, page_size),
             disk_total: cur.disk.0,
             disk_used: cur.disk.1,
             disk_avail: cur.disk.2,
@@ -496,6 +540,23 @@ fn compute(prev: &Snapshot, cur: &Snapshot, cores: u32, page_size: u64) -> (Dist
             mem_cache: cur.mem_cache,
         },
     )
+}
+
+/// 每个进程的 CPU 口径与发行版总量一致，按私有内存降序取前 10 个
+fn top_processes(prev: &Snapshot, cur: &Snapshot, dt: f64, page_size: u64) -> Vec<ProcessStat> {
+    let mut list: Vec<ProcessStat> = cur
+        .procs
+        .iter()
+        .map(|(pid, p)| ProcessStat {
+            name: p.comm.clone(),
+            cpu_percent: (jiff_delta(*pid, p, prev) as f64 / dt * 100.0).clamp(0.0, 100.0),
+            mem_used: p.private_pages * page_size,
+            mem_rss: p.rss_pages * page_size,
+        })
+        .collect();
+    list.sort_by_key(|p| std::cmp::Reverse(p.mem_used));
+    list.truncate(10);
+    list
 }
 
 /// 在发行版里常驻的 sh 进程。复用它采样，避免每次刷新都启动 wsl.exe。
@@ -889,6 +950,63 @@ mod tests {
     #[test]
     fn ignores_plain_archive_attribute_for_compaction() {
         assert_eq!(compact_blocker("AlpineStore", 0x20), None);
+    }
+
+    fn proc_sample(comm: &str, jiff: u64, private: u64, rss: u64) -> ProcSample {
+        ProcSample {
+            comm: comm.to_string(),
+            jiff,
+            private_pages: private,
+            rss_pages: rss,
+        }
+    }
+
+    fn snapshot(procs: HashMap<u32, ProcSample>, cpu_total: u64) -> Snapshot {
+        Snapshot {
+            cpu_total,
+            cpu_idle: 0,
+            procs,
+            statm: (0, 0),
+            mem_total: 0,
+            mem_available: 0,
+            mem_free: 0,
+            mem_cache: 0,
+            disk: (0, 0, 0),
+        }
+    }
+
+    #[test]
+    fn top_processes_sorts_by_private_mem_and_keeps_10() {
+        let cur = snapshot(
+            (1..=15u32)
+                .map(|pid| (pid, proc_sample(&format!("p{pid}"), 0, pid as u64, pid as u64)))
+                .collect(),
+            100,
+        );
+        let list = top_processes(&snapshot(HashMap::new(), 0), &cur, 100.0, 4096);
+        assert_eq!(list.len(), 10);
+        assert_eq!(list[0].name, "p15");
+        assert_eq!(list[0].mem_used, 15 * 4096);
+        assert_eq!(list[9].name, "p6");
+        assert!(list.windows(2).all(|w| w[0].mem_used >= w[1].mem_used));
+    }
+
+    #[test]
+    fn top_processes_new_pids_get_full_jiff_and_clamp() {
+        let mut prev_procs = HashMap::new();
+        prev_procs.insert(1, proc_sample("old", 100, 1, 1));
+        // prev 中不存在的 pid 视为新进程，jiff 全量计入；增量超过 dt 时截断到 100
+        let cur = snapshot(
+            HashMap::from([
+                (1, proc_sample("old", 300, 1, 1)),
+                (2, proc_sample("new", 250, 2, 2)),
+            ]),
+            200,
+        );
+        let list = top_processes(&snapshot(prev_procs, 0), &cur, 100.0, 4096);
+        assert_eq!(list[0].name, "new");
+        assert_eq!(list[0].cpu_percent, 100.0); // 250/100 截断
+        assert_eq!(list[1].cpu_percent, 100.0); // (300-100)/100 截断
     }
 
 }

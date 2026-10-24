@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { HardDrive, Loader2, MoreVertical, Power, Shrink, Star, TerminalSquare } from "lucide-react";
+import { ChevronDown, HardDrive, Loader2, MoreVertical, Power, Shrink, Star, TerminalSquare } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,6 +38,7 @@ export function DistroCard({ distro, vmMemTotal, onChanged, onError }: DistroCar
   const [compacting, setCompacting] = useState(false);
   const [compactOpen, setCompactOpen] = useState(false);
   const [compactResult, setCompactResult] = useState<CompactResult | null>(null);
+  const [procsOpen, setProcsOpen] = useState(false);
   const { name, running, stats } = distro;
 
   const run = async (action: () => Promise<void>) => {
@@ -145,6 +146,42 @@ export function DistroCard({ distro, vmMemTotal, onChanged, onError }: DistroCar
               value={percent(stats.diskUsed, stats.diskTotal)}
               detail={`${formatBytes(stats.diskUsed)} / ${formatBytes(stats.diskTotal)}`}
             />
+            {stats.processes.length === 0 ? (
+              <p className="border-t pt-3 text-xs text-muted-foreground">0 个进程</p>
+            ) : (
+              <div className="border-t pt-3 text-xs">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1 text-muted-foreground hover:text-foreground"
+                  onClick={() => setProcsOpen((v) => !v)}
+                >
+                  <ChevronDown
+                    className={cn("size-3.5 transition-transform", procsOpen && "rotate-180")}
+                  />
+                  进程 {stats.processCount} 个
+                </button>
+                {procsOpen && (
+                  <div className="mt-1.5 space-y-1">
+                    {stats.processes.map((p, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <span className="truncate" title={p.name}>
+                          {p.name}
+                        </span>
+                        <span className="ml-auto shrink-0 tabular-nums">
+                          {formatBytes(p.memUsed)}
+                          <span className="text-muted-foreground"> · {p.cpuPercent.toFixed(1)}%</span>
+                        </span>
+                      </div>
+                    ))}
+                    {stats.processCount > stats.processes.length && (
+                      <p className="text-muted-foreground">
+                        其余 {stats.processCount - stats.processes.length} 个
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         ) : running && distro.error ? (
           <p className="h-[124px] text-sm text-destructive">采样失败：{distro.error}</p>
