@@ -10,6 +10,7 @@ pub fn tooltip_text(
     running: usize,
     schedule: &Status,
     now: Instant,
+    update: Option<&str>,
 ) -> String {
     let mut lines = vec!["WSL Manager".to_string()];
     if running == 0 {
@@ -32,6 +33,9 @@ pub fn tooltip_text(
         lines.push(format!("{running} 个发行版运行中"));
     }
     lines.push(schedule_text(schedule));
+    if let Some(version) = update {
+        lines.push(format!("有新版本 v{version}"));
+    }
     truncate_tooltip(&lines.join("\n"))
 }
 
@@ -118,10 +122,19 @@ mod tests {
     #[test]
     fn formats_running_memory_and_schedule_countdown() {
         let now = Instant::now();
-        let text = tooltip_text(Some(&vm(now)), 2, &schedule(20, 700), now);
+        let text = tooltip_text(Some(&vm(now)), 2, &schedule(20, 700), now, None);
         assert_eq!(
             text,
             "WSL Manager\n内存 6.2 GB / 12.0 GB · 缓存 3.1 GB\n2 个发行版运行中\n定时释放：12 分钟后"
+        );
+    }
+
+    #[test]
+    fn appends_available_update_version() {
+        let now = Instant::now();
+        assert_eq!(
+            tooltip_text(None, 0, &schedule(0, 0), now, Some("0.3.0")),
+            "WSL Manager\nWSL 未运行\n定时释放：关闭\n有新版本 v0.3.0"
         );
     }
 
@@ -133,6 +146,7 @@ mod tests {
             1,
             &schedule(0, 0),
             now,
+            None,
         );
         assert!(text.contains(" (3 分钟前)"));
     }
@@ -141,11 +155,11 @@ mod tests {
     fn formats_not_running_and_running_without_a_sample() {
         let now = Instant::now();
         assert_eq!(
-            tooltip_text(None, 0, &schedule(0, 0), now),
+            tooltip_text(None, 0, &schedule(0, 0), now, None),
             "WSL Manager\nWSL 未运行\n定时释放：关闭"
         );
         assert_eq!(
-            tooltip_text(None, 2, &schedule(0, 0), now),
+            tooltip_text(None, 2, &schedule(0, 0), now, None),
             "WSL Manager\n2 个发行版运行中\n定时释放：关闭"
         );
     }
@@ -153,23 +167,23 @@ mod tests {
     #[test]
     fn formats_schedule_states_and_failures() {
         let now = Instant::now();
-        assert!(tooltip_text(None, 1, &schedule(0, 0), now).contains("定时释放：关闭"));
+        assert!(tooltip_text(None, 1, &schedule(0, 0), now, None).contains("定时释放：关闭"));
 
         let mut busy = schedule(15, 0);
         busy.busy = true;
-        assert!(tooltip_text(None, 1, &busy, now).contains("正在释放缓存…"));
+        assert!(tooltip_text(None, 1, &busy, now, None).contains("正在释放缓存…"));
 
         let mut waiting = schedule(15, 0);
         waiting.waiting = true;
-        assert!(tooltip_text(None, 1, &waiting, now).contains("定时释放：等待 WSL 运行"));
+        assert!(tooltip_text(None, 1, &waiting, now, None).contains("定时释放：等待 WSL 运行"));
 
-        assert!(tooltip_text(None, 1, &schedule(15, 59), now).contains("不到 1 分钟"));
+        assert!(tooltip_text(None, 1, &schedule(15, 59), now, None).contains("不到 1 分钟"));
 
         let mut failed = schedule(15, 60);
         failed.error = Some("failed".into());
-        assert!(tooltip_text(None, 1, &failed, now).contains("1 分钟后（上次失败）"));
+        assert!(tooltip_text(None, 1, &failed, now, None).contains("1 分钟后（上次失败）"));
         failed.busy = true;
-        assert!(!tooltip_text(None, 1, &failed, now).contains("上次失败"));
+        assert!(!tooltip_text(None, 1, &failed, now, None).contains("上次失败"));
     }
 
     #[test]
@@ -181,7 +195,7 @@ mod tests {
             free: 0,
             cache: u64::MAX,
         };
-        let text = tooltip_text(Some(&sample), usize::MAX, &schedule(u32::MAX, u64::MAX), now);
+        let text = tooltip_text(Some(&sample), usize::MAX, &schedule(u32::MAX, u64::MAX), now, None);
         assert!(text.encode_utf16().count() <= TOOLTIP_LIMIT);
         assert_eq!(
             truncate_tooltip(&"🙂".repeat(100)).encode_utf16().count(),

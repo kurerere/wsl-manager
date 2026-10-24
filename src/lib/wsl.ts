@@ -62,6 +62,23 @@ export interface CompactResult {
   after: number;
 }
 
+export interface AvailableUpdate {
+  version: string;
+  notes: string | null;
+  date: string | null;
+}
+
+export interface UpdateStatus {
+  currentVersion: string;
+  available: AvailableUpdate | null;
+  installable: boolean;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+
 export const api = {
   overview: () => invoke<Overview>("get_overview"),
   terminate: (name: string) => invoke<void>("terminate_distro", { name }),
@@ -76,6 +93,10 @@ export const api = {
   setAutostart: (enabled: boolean) => invoke<AppSettings>("set_autostart", { enabled }),
   setCloseToTray: (enabled: boolean) => invoke<AppSettings>("set_close_to_tray", { enabled }),
   windowVisibility: () => invoke<boolean>("get_window_visibility"),
+  checkUpdate: () => invoke<UpdateStatus>("check_update"),
+  updateStatus: () => invoke<UpdateStatus | null>("get_update_status"),
+  installUpdate: () => invoke<void>("install_update"),
+  openReleasePage: () => invoke<void>("open_release_page"),
 };
 
 export function formatBytes(bytes: number): string {

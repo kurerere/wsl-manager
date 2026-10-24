@@ -24,6 +24,17 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhCNzVGQ0YwN0VCMTE5QUQKUldTdEdiRis4UHgxaThOU21PT3QwT3B0T3l3UE9aOURsemEzS05VTU4zRkF2Z2RMN245VzJrRmMK",
+      "endpoints": [
+        "https://github.com/kurerere/wsl-manager/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

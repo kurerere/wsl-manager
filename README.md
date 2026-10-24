@@ -35,6 +35,7 @@ WSL2 的所有发行版都跑在同一个虚拟机里。在任务管理器里只
 - **发行版卡片**：CPU / 内存 / 根分区磁盘使用率、进程数、默认发行版、WSL 版本
 - **管理操作**：打开终端（优先 Windows Terminal）、设为默认、终止发行版、关闭全部 WSL
 - **系统托盘**：关闭窗口时可最小化到托盘，支持开机自启；托盘菜单可显示窗口、释放缓存或退出；悬停显示 WSL 内存、运行中发行版数和下次定时释放时间
+- **在线升级**：启动时检查更新，确认后下载安装；免安装版提示前往下载
 - **VHDX 压缩**：压缩 WSL 2 虚拟磁盘需要 WSL 3.0.1 或更高版本；稀疏、NTFS 压缩或加密的 VHDX 不支持压缩，并会在终止发行版前检测；只终止选中的运行中发行版，不会启动已停止的发行版。可回收空间可能为 0
 - 刷新间隔可选 2 秒 / 5 秒 / 10 秒 / 暂停，窗口最小化时自动暂停；跟随系统深色模式
 
@@ -88,6 +89,8 @@ git push origin v0.1.0
 `v1.2.3-beta.1` 这类预发布 tag 会标记为 Pre-release，且只提供 NSIS 安装包（MSI 不支持非数字预发布版本号）。
 在 Actions 页面手动运行该工作流则只构建并上传产物，不创建 Release。
 
+在线升级签名由工作流使用 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets 生成，私钥务必另行备份；丢失后现有安装用户将无法接收更新。`latest.json` 由 Release 工作流生成。首个启用在线升级的版本需要现有用户手动下载安装。
+
 修改图标：编辑 `app-icon.svg` 后运行 `pnpm tauri icon app-icon.svg`。
 
 ## 目录结构
@@ -95,6 +98,7 @@ git push origin v0.1.0
 ```
 src-tauri/src/wsl.rs                 采样会话、注册表读取、数据解析、wsl.exe 管理命令
 src-tauri/src/lib.rs                 Tauri 命令
+src-tauri/src/updater.rs             在线更新与安装检测
 src/App.tsx                          主界面与轮询
 src/components/memory-breakdown.tsx  内存分布
 src/components/charts.tsx            趋势图、VHDX 条形图（Recharts）

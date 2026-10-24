@@ -16,6 +16,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
@@ -54,12 +56,15 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          node -e "const fs=require('fs');const f='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(f,'utf8'));c.version=process.env.VERSION;fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')"
+          node -e "const fs=require('fs');const f='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(f,'utf8'));c.version=process.env.VERSION;c.bundle.createUpdaterArtifacts=true;fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')"
 
       - run: pnpm install --frozen-lockfile
 
       - name: Build
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if ("${{ steps.version.outputs.prerelease }}" -eq "true") {
             pnpm tauri build --bundles nsis
@@ -76,11 +81,48 @@ jobs:
           New-Item -ItemType Directory -Force $out | Out-Null
           $bundle = "src-tauri/target/release/bundle"
           $name = "wsl-manager_${env:VERSION}_windows-amd64"
+          $tag = "v$($env:VERSION)"
 
-          Copy-Item (Get-ChildItem "$bundle/nsis/*-setup.exe" | Select-Object -First 1) "$out/$name-setup.exe"
+          $setup = Get-ChildItem "$bundle/nsis/*-setup.exe" | Select-Object -First 1
+          Copy-Item $setup.FullName "$out/$name-setup.exe"
           $msi = Get-ChildItem "$bundle/msi/*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($msi) { Copy-Item $msi "$out/$name.msi" }
           Copy-Item "src-tauri/target/release/wsl-manager.exe" "$out/$name-portable.exe"
+
+          $previousTag = git describe --tags --abbrev=0 HEAD^ 2>$null
+          if ($LASTEXITCODE -eq 0 -and $previousTag) {
+            $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.txt"
+            $logScript = 'const fs=require("node:fs");const{execFileSync}=require("node:child_process");const log=execFileSync("git",["-c","i18n.logOutputEncoding=UTF-8","log",process.argv[1],"--format=%s"],{encoding:"utf8"}).trim();fs.writeFileSync(process.argv[2],log?log.split(/\r?\n/).map(subject=>"- "+subject).join("\n"):"","utf8");'
+            & node -e $logScript "$previousTag..HEAD" $notesFile
+            if ($LASTEXITCODE -eq 0) { $notes = [System.IO.File]::ReadAllText($notesFile, [System.Text.Encoding]::UTF8) }
+          }
+          if (-not $notes -or -not $notes.Trim()) { $notes = "WSL Manager v$($env:VERSION)" }
+
+          $nsisSignature = [System.IO.File]::ReadAllText("$($setup.FullName).sig").Trim()
+          $platforms = [ordered]@{
+            "windows-x86_64" = [ordered]@{
+              url = "https://github.com/kurerere/wsl-manager/releases/download/$tag/$name-setup.exe"
+              signature = $nsisSignature
+            }
+            "windows-x86_64-nsis" = [ordered]@{
+              url = "https://github.com/kurerere/wsl-manager/releases/download/$tag/$name-setup.exe"
+              signature = $nsisSignature
+            }
+          }
+          if ($msi) {
+            $platforms["windows-x86_64-msi"] = [ordered]@{
+              url = "https://github.com/kurerere/wsl-manager/releases/download/$tag/$name.msi"
+              signature = [System.IO.File]::ReadAllText("$($msi.FullName).sig").Trim()
+            }
+          }
+          $manifest = [ordered]@{
+            version = $env:VERSION
+            notes = $notes
+            pub_date = [DateTime]::UtcNow.ToString("o")
+            platforms = $platforms
+          }
+          $manifestJson = $manifest | ConvertTo-Json -Depth 8
+          [System.IO.File]::WriteAllText("$out/latest.json", $manifestJson, [System.Text.UTF8Encoding]::new($false))
 
           Get-ChildItem $out -File | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"

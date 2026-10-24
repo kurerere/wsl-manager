@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Cpu, HardDrive, MemoryStick, PowerOff, RefreshCw, Settings } from "lucide-react";
+import { Cpu, Download, HardDrive, MemoryStick, PowerOff, RefreshCw, Settings } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -9,8 +19,11 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TrendChart, VhdxChart, type Series } from "@/components/charts";
@@ -19,7 +32,15 @@ import { CacheControls } from "@/components/cache-controls";
 import { MemoryBreakdown } from "@/components/memory-breakdown";
 import { Metric } from "@/components/metric";
 import { appendSample, emptyHistory, seriesColor, seriesKey, VM_KEY, type History } from "@/lib/history";
-import { api, formatBytes, percent, type AppSettings, type Overview } from "@/lib/wsl";
+import {
+  api,
+  formatBytes,
+  percent,
+  type AppSettings,
+  type Overview,
+  type UpdateProgress,
+  type UpdateStatus,
+} from "@/lib/wsl";
 import { cn } from "@/lib/utils";
 
 const INTERVALS = [
@@ -38,6 +59,13 @@ export default function App() {
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [windowVisible, setWindowVisible] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [updateDialogError, setUpdateDialogError] = useState<string | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateDownloading, setUpdateDownloading] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const inFlight = useRef(false);
   // 发行版名 -> 颜色槽位，首次出现时分配后不再变化
   const slots = useRef(new Map<string, number>());
@@ -88,6 +116,38 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    let receivedEvent = false;
+    let unlisten: (() => void)[] = [];
+    const subscriptions = Promise.all([
+      listen<UpdateStatus>("update-available", ({ payload }) => {
+        receivedEvent = true;
+        setUpdateStatus(payload);
+      }),
+      listen<UpdateProgress>("update-progress", ({ payload }) => setUpdateProgress(payload)),
+      listen("update-installing", () => {
+        setUpdateDownloading(false);
+        setUpdateInstalling(true);
+      }),
+    ]);
+    void subscriptions.then(async (listeners) => {
+      if (cancelled) {
+        listeners.forEach((stop) => stop());
+        return;
+      }
+      unlisten = listeners;
+      try {
+        const status = await api.updateStatus();
+        if (!cancelled && !receivedEvent && status) setUpdateStatus(status);
+      } catch {}
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten.forEach((stop) => stop());
+    };
+  }, []);
+
   const updateSetting = async (
     setter: (enabled: boolean) => Promise<AppSettings>,
     enabled: boolean,
@@ -99,6 +159,41 @@ export default function App() {
       setError(String(e));
     } finally {
       setSettingsBusy(false);
+    }
+  };
+
+  const checkForUpdates = async () => {
+    setUpdateDialogOpen(true);
+    setUpdateDialogError(null);
+    setUpdateChecking(true);
+    try {
+      setUpdateStatus(await api.checkUpdate());
+    } catch (e) {
+      setUpdateDialogError(String(e));
+    } finally {
+      setUpdateChecking(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setUpdateDialogError(null);
+    setUpdateProgress({ downloaded: 0, total: null });
+    setUpdateDownloading(true);
+    try {
+      await api.installUpdate();
+    } catch (e) {
+      setUpdateDialogError(String(e));
+      setUpdateDownloading(false);
+      setUpdateInstalling(false);
+    }
+  };
+
+  const openReleasePage = async () => {
+    try {
+      await api.openReleasePage();
+      setUpdateDialogOpen(false);
+    } catch (e) {
+      setUpdateDialogError(String(e));
     }
   };
 
@@ -176,6 +271,12 @@ export default function App() {
               ))}
             </SelectContent>
           </Select>
+          {updateStatus?.available && (
+            <Button variant="outline" size="sm" onClick={() => setUpdateDialogOpen(true)}>
+              <Download data-icon="inline-start" />
+              新版本 v{updateStatus.available.version}
+            </Button>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="sm" aria-label="设置">
@@ -199,6 +300,13 @@ export default function App() {
                 >
                   关闭窗口时最小化到托盘
                 </DropdownMenuCheckboxItem>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                <DropdownMenuItem disabled={updateChecking} onSelect={() => void checkForUpdates()}>
+                  <Download />
+                  检查更新
+                </DropdownMenuItem>
               </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -323,6 +431,90 @@ export default function App() {
           容量的比例（两次刷新之间的平均值），内存为其进程的私有内存之和（不含共享内存和文件缓存），磁盘为发行版根分区的使用情况。
         </p>
       </main>
+      <AlertDialog
+        open={updateDialogOpen}
+        onOpenChange={(open) => {
+          if (!updateChecking && !updateDownloading && !updateInstalling) setUpdateDialogOpen(open);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {updateStatus?.available
+                ? `发现新版本 v${updateStatus.available.version}`
+                : updateDialogError
+                  ? "检查更新失败"
+                  : "检查更新"}
+            </AlertDialogTitle>
+            {updateStatus?.available ? (
+              <>
+                <AlertDialogDescription>当前版本 v{updateStatus.currentVersion}</AlertDialogDescription>
+                <div className="max-h-60 overflow-y-auto rounded-md border p-3 text-sm whitespace-pre-wrap">
+                  {updateStatus.available.notes || "暂无更新说明"}
+                </div>
+              </>
+            ) : (
+              <AlertDialogDescription>
+                {updateDialogError ??
+                  (updateStatus
+                    ? `已是最新版本 v${updateStatus.currentVersion}`
+                    : "正在检查更新…")}
+              </AlertDialogDescription>
+            )}
+            {updateDialogError && updateStatus?.available && (
+              <p className="text-sm text-destructive whitespace-pre-wrap">{updateDialogError}</p>
+            )}
+          </AlertDialogHeader>
+          {updateDownloading && updateProgress && (
+            <div className="flex flex-col gap-2">
+              <Progress
+                value={
+                  updateProgress.total
+                    ? Math.min(100, (updateProgress.downloaded / updateProgress.total) * 100)
+                    : 40
+                }
+                indicatorClassName={!updateProgress.total ? "animate-pulse" : undefined}
+                aria-label="更新下载进度"
+              />
+              <p className="text-xs text-muted-foreground">
+                {updateProgress.total
+                  ? `已下载 ${formatBytes(updateProgress.downloaded)} / ${formatBytes(updateProgress.total)}`
+                  : `已下载 ${formatBytes(updateProgress.downloaded)}（总大小未知）`}
+              </p>
+            </div>
+          )}
+          {updateInstalling && (
+            <p role="status" className="text-sm text-muted-foreground">正在安装，应用将自动退出</p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={updateChecking || updateDownloading || updateInstalling}>
+              取消
+            </AlertDialogCancel>
+            {updateStatus?.available && updateStatus.installable && (
+              <AlertDialogAction
+                disabled={updateChecking || updateDownloading || updateInstalling}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void installUpdate();
+                }}
+              >
+                {updateDownloading ? "正在下载…" : "下载并安装"}
+              </AlertDialogAction>
+            )}
+            {updateStatus?.available && !updateStatus.installable && (
+              <AlertDialogAction
+                disabled={updateChecking || updateDownloading || updateInstalling}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void openReleasePage();
+                }}
+              >
+                前往下载
+              </AlertDialogAction>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

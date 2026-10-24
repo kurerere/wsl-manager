@@ -1,6 +1,7 @@
 mod wsl;
 mod cache_schedule;
 mod tray_status;
+mod updater;
 
 use tauri::async_runtime::spawn_blocking;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -114,6 +115,36 @@ async fn compact_distro(name: String) -> Result<wsl::CompactResult, String> {
     blocking(move || wsl::compact(&name)).await
 }
 
+#[tauri::command]
+async fn check_update(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<updater::UpdaterState>>,
+) -> Result<updater::UpdateStatus, String> {
+    let status = updater::check(&app, state.inner()).await?;
+    refresh_tray_tooltip(&app);
+    Ok(status)
+}
+
+#[tauri::command]
+fn get_update_status(
+    state: tauri::State<'_, Arc<updater::UpdaterState>>,
+) -> Option<updater::UpdateStatus> {
+    updater::stored_status(state.inner())
+}
+
+#[tauri::command]
+async fn install_update(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<updater::UpdaterState>>,
+) -> Result<(), String> {
+    updater::install(&app, state.inner()).await
+}
+
+#[tauri::command]
+fn open_release_page(app: AppHandle) -> Result<(), String> {
+    updater::open_release_page(&app)
+}
+
 fn app_settings(app: &AppHandle, state: &AppState) -> Result<AppSettings, String> {
     Ok(AppSettings {
         autostart: app.autolaunch().is_enabled().map_err(|e| e.to_string())?,
@@ -175,11 +206,15 @@ fn refresh_tray_tooltip(app: &AppHandle) {
     let state = app.state::<AppState>();
     let schedule = app.state::<Arc<CacheSchedule>>();
     let status = schedule.state.lock().unwrap().status();
+    let update_version = app
+        .try_state::<Arc<updater::UpdaterState>>()
+        .and_then(|state| updater::available_version(state.inner()));
     let text = tray_status::tooltip_text(
         wsl::last_vm_sample().as_ref(),
         state.running_count.load(Ordering::Relaxed),
         &status,
         Instant::now(),
+        update_version.as_deref(),
     );
     let mut last = state.last_tooltip.lock().unwrap();
     if *last == text {
@@ -265,6 +300,7 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let directory = app.path().app_config_dir()?;
             std::fs::create_dir_all(&directory)?;
@@ -288,9 +324,19 @@ pub fn run() {
                 tooltip_refreshing: AtomicBool::new(false),
                 last_tooltip: Mutex::new(String::new()),
             });
+            app.manage(Arc::new(updater::UpdaterState::default()));
             setup_tray(app.handle())?;
             if !autostart {
                 show_main_window(app.handle());
+            }
+            if !cfg!(debug_assertions) {
+                let handle = app.handle().clone();
+                let state = app.state::<Arc<updater::UpdaterState>>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    if updater::check(&handle, &state).await.is_ok() {
+                        refresh_tray_tooltip(&handle);
+                    }
+                });
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -336,6 +382,10 @@ pub fn run() {
             set_default_distro,
             open_terminal,
             compact_distro,
+            check_update,
+            get_update_status,
+            install_update,
+            open_release_page,
             get_app_settings,
             set_autostart,
             set_close_to_tray,
