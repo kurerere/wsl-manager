@@ -26,9 +26,8 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # 按 rust-toolchain.toml 安装固定版本的工具链
+      - run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -73,6 +73,7 @@ pnpm tauri build --no-bundle   # 只生成 exe：src-tauri/target/release/wsl-ma
 ```
 
 CI 会在推送到 main 和创建 Pull Request 时运行 Windows 构建、Clippy 与测试。
+Rust 版本由 `rust-toolchain.toml` 固定，rustup 会自动安装；升级时修改该文件并修复新版 Clippy 的提示。
 
 ## 发布
 
