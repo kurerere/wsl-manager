@@ -48,7 +48,7 @@ impl Schedule {
     }
 
     pub fn begin(&mut self, automatic: bool, now: Instant) -> bool {
-        if self.busy || self.waiting || (automatic && !self.deadline.is_some_and(|d| d <= now)) {
+        if self.busy || self.waiting || (automatic && self.deadline.is_none_or(|d| d > now)) {
             return false;
         }
         self.busy = true;

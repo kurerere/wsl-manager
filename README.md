@@ -72,6 +72,8 @@ pnpm tauri build               # 打包安装程序（MSI / NSIS）
 pnpm tauri build --no-bundle   # 只生成 exe：src-tauri/target/release/wsl-manager.exe
 ```
 
+CI 会在推送到 main 和创建 Pull Request 时运行 Windows 构建、Clippy 与测试。
+
 ## 发布
 
 推送 `v*` 格式的 tag 即触发 GitHub Actions（`.github/workflows/release.yml`），自动构建 windows-amd64 安装包并创建 Release，

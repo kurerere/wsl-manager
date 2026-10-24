@@ -112,7 +112,7 @@ fn host_memory() -> Option<HostMemory> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
     m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-    (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then(|| HostMemory {
+    (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then_some(HostMemory {
         total: m.ullTotalPhys,
         available: m.ullAvailPhys,
     })
