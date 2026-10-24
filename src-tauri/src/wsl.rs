@@ -74,6 +74,7 @@ pub struct Distro {
     pub version: u8,
     pub is_default: bool,
     pub vhdx_path: Option<String>,
+    pub compact_blocker: Option<String>,
     /// VHDX 文件在 Windows 磁盘上实际占用的大小，字节
     pub vhdx_size: Option<u64>,
     pub stats: Option<DistroStats>,
@@ -86,6 +87,13 @@ pub struct Overview {
     pub distros: Vec<Distro>,
     pub vm: Option<VmStats>,
     pub host: Option<HostMemory>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactResult {
+    pub before: u64,
+    pub after: u64,
 }
 
 /// Windows 物理内存
@@ -137,6 +145,71 @@ fn run_wsl(args: &[&str]) -> Result<String, String> {
         let msg = if msg.trim().is_empty() { decode(&out.stdout) } else { msg };
         Err(msg.trim().to_string())
     }
+}
+
+fn parse_wsl_version(output: &str) -> Option<(u32, u32, u32)> {
+    output.lines().next()?.split_whitespace().find_map(|token| {
+        let parts: Vec<_> = token.split('.').collect();
+        if !(3..=4).contains(&parts.len()) || parts.iter().any(|part| !part.bytes().all(|b| b.is_ascii_digit())) {
+            return None;
+        }
+        Some((parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?))
+    })
+}
+
+fn compact_version_supported(version: (u32, u32, u32)) -> bool {
+    version >= (3, 0, 1)
+}
+
+fn compact_supported() -> bool {
+    run_wsl(&["--version"])
+        .ok()
+        .and_then(|output| parse_wsl_version(&output))
+        .is_some_and(compact_version_supported)
+}
+
+const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x200;
+const FILE_ATTRIBUTE_COMPRESSED: u32 = 0x800;
+const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x4000;
+
+fn compact_blocker(name: &str, attributes: u32) -> Option<String> {
+    if attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0 {
+        Some(format!(
+            "{name} 的虚拟磁盘是稀疏文件（已启用稀疏 VHD），WSL 不支持压缩这类磁盘。稀疏 VHD 会自动回收已释放的空间，无需手动压缩。"
+        ))
+    } else if attributes & FILE_ATTRIBUTE_COMPRESSED != 0 {
+        Some(format!(
+            "{name} 的虚拟磁盘启用了 NTFS 压缩，WSL 不支持压缩这类磁盘。"
+        ))
+    } else if attributes & FILE_ATTRIBUTE_ENCRYPTED != 0 {
+        Some(format!(
+            "{name} 的虚拟磁盘启用了 NTFS 加密（EFS），WSL 不支持压缩这类磁盘。"
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn compact_blocker_from_metadata(name: &str, metadata: &std::fs::Metadata) -> Option<String> {
+    use std::os::windows::fs::MetadataExt;
+    compact_blocker(name, metadata.file_attributes())
+}
+
+#[cfg(not(windows))]
+fn compact_blocker_from_metadata(_name: &str, _metadata: &std::fs::Metadata) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+fn compact_blocker_for_path(name: &str, path: &str) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    compact_blocker_from_metadata(name, &metadata)
+}
+
+#[cfg(not(windows))]
+fn compact_blocker_for_path(_name: &str, _path: &str) -> Option<String> {
+    None
 }
 
 struct ListEntry {
@@ -446,6 +519,19 @@ impl Drop for Session {
 
 /// 发行版名 -> 常驻会话
 static SESSIONS: LazyLock<Mutex<HashMap<String, Session>>> = LazyLock::new(Default::default);
+static COMPACTING: LazyLock<Mutex<Option<String>>> = LazyLock::new(Default::default);
+
+struct CompactGuard;
+
+impl Drop for CompactGuard {
+    fn drop(&mut self) {
+        *COMPACTING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+pub fn close_sessions() {
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
 
 /// 先给所有会话发采样命令，再统一读取，各发行版并行执行
 fn sample_all<'a>(
@@ -475,10 +561,14 @@ pub fn overview() -> Result<Overview, String> {
     let running = running_set();
 
     let mut sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let compacting = COMPACTING.lock().unwrap_or_else(|e| e.into_inner()).clone();
     // 已停止的发行版关闭会话，新运行的发行版建立会话
-    sessions.retain(|name, _| running.contains(name));
+    sessions.retain(|name, _| running.contains(name) && compacting.as_deref() != Some(name));
     let mut errors: HashMap<String, String> = HashMap::new();
     for name in &running {
+        if compacting.as_deref() == Some(name) {
+            continue;
+        }
         if !sessions.contains_key(name) {
             match Session::start(name) {
                 Ok(s) => {
@@ -537,11 +627,14 @@ pub fn overview() -> Result<Overview, String> {
             if vm.is_none() {
                 vm = vm_stats;
             }
-            let vhdx_size = e
+            let metadata = e
                 .vhdx_path
                 .as_ref()
-                .and_then(|p| std::fs::metadata(p).ok())
-                .map(|m| m.len());
+                .and_then(|path| std::fs::metadata(path).ok());
+            let vhdx_size = metadata.as_ref().map(|metadata| metadata.len());
+            let compact_blocker = metadata
+                .as_ref()
+                .and_then(|metadata| compact_blocker_from_metadata(&e.name, metadata));
             Distro {
                 running: running.contains(&e.name),
                 error: errors.remove(&e.name),
@@ -549,6 +642,7 @@ pub fn overview() -> Result<Overview, String> {
                 version: e.version,
                 is_default: e.is_default,
                 vhdx_path: e.vhdx_path,
+                compact_blocker,
                 vhdx_size,
                 stats,
             }
@@ -580,6 +674,52 @@ pub fn drop_caches() -> Result<(), String> {
     .map(|_| ())
 }
 
+pub fn compact(name: &str) -> Result<CompactResult, String> {
+    {
+        let mut compacting = COMPACTING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(other) = compacting.as_ref() {
+            return Err(format!("正在压缩 {other}，请稍后再试"));
+        }
+        *compacting = Some(name.to_string());
+    }
+    let _guard = CompactGuard;
+
+    let entry = list_entries()
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| format!("未找到发行版 {name}"))?;
+    let path = entry.vhdx_path.ok_or_else(|| format!("未找到 {name} 的 VHDX 文件路径"))?;
+    if let Some(blocker) = compact_blocker_for_path(name, &path) {
+        return Err(blocker);
+    }
+    if entry.version != 2 {
+        return Err("仅支持压缩 WSL 2 发行版".into());
+    }
+    if !compact_supported() {
+        return Err("压缩磁盘需要 WSL 3.0.1 或更高版本，请先运行 wsl --update".into());
+    }
+    let before = std::fs::metadata(&path).map_err(|e| format!("读取 VHDX 文件大小失败：{e}"))?.len();
+
+    if running_set().contains(name) {
+        SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
+        terminate(name)?;
+        let stopped_at = Instant::now();
+        loop {
+            if !running_set().contains(name) {
+                break;
+            }
+            if stopped_at.elapsed() >= Duration::from_secs(10) {
+                return Err(format!("等待发行版 {name} 停止超时"));
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+    }
+
+    run_wsl(&["--manage", name, "--compact"])?;
+    let after = std::fs::metadata(path).map_err(|e| format!("读取 VHDX 文件大小失败：{e}"))?.len();
+    Ok(CompactResult { before, after })
+}
+
 pub fn terminate(name: &str) -> Result<(), String> {
     run_wsl(&["--terminate", name]).map(|_| ())
 }
@@ -604,4 +744,60 @@ pub fn open_terminal(name: &str) -> Result<(), String> {
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("无法打开终端: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_chinese_wsl_version() {
+        assert_eq!(parse_wsl_version("WSL 版本: 3.0.3.0"), Some((3, 0, 3)));
+    }
+
+    #[test]
+    fn parses_english_wsl_version() {
+        assert_eq!(parse_wsl_version("WSL version: 2.6.1.0"), Some((2, 6, 1)));
+    }
+
+    #[test]
+    fn ignores_unrecognized_wsl_version() {
+        assert_eq!(parse_wsl_version("not a version\nWSL version: 3.0.3.0"), None);
+    }
+
+    #[test]
+    fn checks_compaction_version_requirement() {
+        assert!(!compact_version_supported((2, 6, 1)));
+        assert!(compact_version_supported((3, 0, 1)));
+        assert!(compact_version_supported((3, 0, 3)));
+    }
+
+    #[test]
+    fn detects_sparse_disk_compaction_blocker() {
+        assert_eq!(
+            compact_blocker("AlpineStore", 0x200),
+            Some("AlpineStore 的虚拟磁盘是稀疏文件（已启用稀疏 VHD），WSL 不支持压缩这类磁盘。稀疏 VHD 会自动回收已释放的空间，无需手动压缩。".into())
+        );
+    }
+
+    #[test]
+    fn detects_compressed_disk_compaction_blocker() {
+        assert_eq!(
+            compact_blocker("AlpineStore", 0x800),
+            Some("AlpineStore 的虚拟磁盘启用了 NTFS 压缩，WSL 不支持压缩这类磁盘。".into())
+        );
+    }
+
+    #[test]
+    fn detects_encrypted_disk_compaction_blocker() {
+        assert_eq!(
+            compact_blocker("AlpineStore", 0x4000),
+            Some("AlpineStore 的虚拟磁盘启用了 NTFS 加密（EFS），WSL 不支持压缩这类磁盘。".into())
+        );
+    }
+
+    #[test]
+    fn ignores_plain_archive_attribute_for_compaction() {
+        assert_eq!(compact_blocker("AlpineStore", 0x20), None);
+    }
 }

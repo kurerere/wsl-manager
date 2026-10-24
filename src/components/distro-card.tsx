@@ -1,5 +1,15 @@
 import { useState } from "react";
-import { HardDrive, MoreVertical, Power, Star, TerminalSquare } from "lucide-react";
+import { HardDrive, Loader2, MoreVertical, Power, Shrink, Star, TerminalSquare } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,7 +23,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Metric } from "@/components/metric";
-import { api, formatBytes, percent, type Distro } from "@/lib/wsl";
+import { api, formatBytes, percent, type CompactResult, type Distro } from "@/lib/wsl";
 import { cn } from "@/lib/utils";
 
 interface DistroCardProps {
@@ -25,6 +35,9 @@ interface DistroCardProps {
 
 export function DistroCard({ distro, vmMemTotal, onChanged, onError }: DistroCardProps) {
   const [busy, setBusy] = useState(false);
+  const [compacting, setCompacting] = useState(false);
+  const [compactOpen, setCompactOpen] = useState(false);
+  const [compactResult, setCompactResult] = useState<CompactResult | null>(null);
   const { name, running, stats } = distro;
 
   const run = async (action: () => Promise<void>) => {
@@ -36,6 +49,22 @@ export function DistroCard({ distro, vmMemTotal, onChanged, onError }: DistroCar
       onError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const compact = async () => {
+    setCompactOpen(false);
+    setBusy(true);
+    setCompacting(true);
+    setCompactResult(null);
+    try {
+      setCompactResult(await api.compactDistro(name));
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setCompacting(false);
+      setBusy(false);
+      onChanged();
     }
   };
 
@@ -80,6 +109,13 @@ export function DistroCard({ distro, vmMemTotal, onChanged, onError }: DistroCar
               <DropdownMenuItem disabled={distro.isDefault} onClick={() => run(() => api.setDefault(name))}>
                 <Star />
                 设为默认
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={distro.version !== 2 || !distro.vhdxPath}
+                onClick={() => setCompactOpen(true)}
+              >
+                <Shrink />
+                压缩磁盘…
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
@@ -128,19 +164,64 @@ export function DistroCard({ distro, vmMemTotal, onChanged, onError }: DistroCar
           </div>
         )}
 
-        {distro.vhdxSize != null && (
+        {(distro.vhdxSize != null || compacting || compactResult) && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <div className="flex items-center gap-1.5 border-t pt-3 text-xs text-muted-foreground">
-                <HardDrive className="size-3.5" />
-                <span>VHDX 文件占用</span>
-                <span className="ml-auto tabular-nums">{formatBytes(distro.vhdxSize)}</span>
+              <div className="space-y-1.5 border-t pt-3 text-xs text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <HardDrive className="size-3.5" />
+                  <span>VHDX 文件占用</span>
+                  <span className="ml-auto tabular-nums">
+                    {distro.vhdxSize != null ? formatBytes(distro.vhdxSize) : "—"}
+                  </span>
+                </div>
+                {compacting ? (
+                  <span className="flex items-center gap-1.5" role="status">
+                    <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" />
+                    正在压缩…
+                  </span>
+                ) : compactResult ? (
+                  <span role="status">
+                    {compactResult.before > compactResult.after
+                      ? `已回收 ${formatBytes(compactResult.before - compactResult.after)}`
+                      : "没有可回收的空间"}
+                  </span>
+                ) : null}
               </div>
             </TooltipTrigger>
             <TooltipContent className="select-text">{distro.vhdxPath}</TooltipContent>
           </Tooltip>
         )}
       </CardContent>
+      <AlertDialog open={compactOpen} onOpenChange={setCompactOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>压缩 {name} 的虚拟磁盘</AlertDialogTitle>
+            <AlertDialogDescription>
+              {distro.compactBlocker ??
+                (running
+                  ? "需要先终止该发行版，其中正在运行的程序会被中断。压缩可能需要几分钟，期间请不要启动它。"
+                  : `当前占用 ${formatBytes(distro.vhdxSize ?? 0)}。压缩可能需要几分钟，期间请不要启动它。`)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            {distro.compactBlocker ? (
+              <AlertDialogCancel>知道了</AlertDialogCancel>
+            ) : (
+              <>
+                <AlertDialogCancel>取消</AlertDialogCancel>
+                <AlertDialogAction
+                  disabled={busy}
+                  className={cn(running && "bg-destructive text-white hover:bg-destructive/90")}
+                  onClick={() => void compact()}
+                >
+                  {running ? "终止并压缩" : "开始压缩"}
+                </AlertDialogAction>
+              </>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }

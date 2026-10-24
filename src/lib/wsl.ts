@@ -31,6 +31,7 @@ export interface Distro {
   version: number;
   isDefault: boolean;
   vhdxPath: string | null;
+  compactBlocker: string | null;
   vhdxSize: number | null;
   stats: DistroStats | null;
   error: string | null;
@@ -51,15 +52,30 @@ export interface CacheSchedule {
   error: string | null;
 }
 
+export interface AppSettings {
+  autostart: boolean;
+  closeToTray: boolean;
+}
+
+export interface CompactResult {
+  before: number;
+  after: number;
+}
+
 export const api = {
   overview: () => invoke<Overview>("get_overview"),
   terminate: (name: string) => invoke<void>("terminate_distro", { name }),
+  compactDistro: (name: string) => invoke<CompactResult>("compact_distro", { name }),
   dropCaches: () => invoke<void>("drop_caches"),
   cacheSchedule: () => invoke<CacheSchedule>("get_cache_schedule"),
   setCacheSchedule: (minutes: number) => invoke<CacheSchedule>("set_cache_schedule", { minutes }),
   shutdown: () => invoke<void>("shutdown_wsl"),
   setDefault: (name: string) => invoke<void>("set_default_distro", { name }),
   openTerminal: (name: string) => invoke<void>("open_terminal", { name }),
+  getAppSettings: () => invoke<AppSettings>("get_app_settings"),
+  setAutostart: (enabled: boolean) => invoke<AppSettings>("set_autostart", { enabled }),
+  setCloseToTray: (enabled: boolean) => invoke<AppSettings>("set_close_to_tray", { enabled }),
+  windowVisibility: () => invoke<boolean>("get_window_visibility"),
 };
 
 export function formatBytes(bytes: number): string {

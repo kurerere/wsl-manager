@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Cpu, HardDrive, MemoryStick, PowerOff, RefreshCw } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { Cpu, HardDrive, MemoryStick, PowerOff, RefreshCw, Settings } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TrendChart, VhdxChart, type Series } from "@/components/charts";
@@ -11,7 +19,7 @@ import { CacheControls } from "@/components/cache-controls";
 import { MemoryBreakdown } from "@/components/memory-breakdown";
 import { Metric } from "@/components/metric";
 import { appendSample, emptyHistory, seriesColor, seriesKey, VM_KEY, type History } from "@/lib/history";
-import { api, formatBytes, percent, type Overview } from "@/lib/wsl";
+import { api, formatBytes, percent, type AppSettings, type Overview } from "@/lib/wsl";
 import { cn } from "@/lib/utils";
 
 const INTERVALS = [
@@ -27,6 +35,9 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [interval, setIntervalMs] = useState("5000");
   const [history, setHistory] = useState<History>(emptyHistory);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [windowVisible, setWindowVisible] = useState(false);
   const inFlight = useRef(false);
   // 发行版名 -> 颜色槽位，首次出现时分配后不再变化
   const slots = useRef(new Map<string, number>());
@@ -51,20 +62,60 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    void api.getAppSettings().then(setAppSettings).catch((e) => setError(String(e)));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let receivedEvent = false;
+    const subscription = listen<boolean>("window-visibility", ({ payload }) => {
+      receivedEvent = true;
+      setWindowVisible(payload);
+    });
+    void subscription.catch(() => {});
+    void api.windowVisibility().then((visible) => {
+      if (!cancelled && !receivedEvent) setWindowVisible(visible);
+    }).catch((e) => {
+      if (!cancelled) {
+        setError(String(e));
+        setWindowVisible(!document.hidden);
+      }
+    });
+    return () => {
+      cancelled = true;
+      void subscription.then((unlisten) => unlisten()).catch(() => {});
+    };
+  }, []);
+
+  const updateSetting = async (
+    setter: (enabled: boolean) => Promise<AppSettings>,
+    enabled: boolean,
+  ) => {
+    setSettingsBusy(true);
+    try {
+      setAppSettings(await setter(enabled));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
   // 上一次采样结束后再计时，避免请求堆积；窗口最小化/不可见时暂停，可见后立即刷新
   useEffect(() => {
     let timer: number | undefined;
     let cancelled = false;
     const tick = async () => {
       window.clearTimeout(timer);
-      if (document.hidden) return;
+      if (!windowVisible || document.hidden) return;
       await refresh();
       if (cancelled || interval === "0") return;
       window.clearTimeout(timer);
       timer = window.setTimeout(tick, Number(interval));
     };
     const onVisibility = () => {
-      if (!document.hidden && interval !== "0") tick();
+      if (windowVisible && !document.hidden && interval !== "0") tick();
     };
     tick();
     document.addEventListener("visibilitychange", onVisibility);
@@ -73,7 +124,7 @@ export default function App() {
       window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [interval, refresh]);
+  }, [interval, refresh, windowVisible]);
 
   const shutdownAll = async () => {
     try {
@@ -125,6 +176,32 @@ export default function App() {
               ))}
             </SelectContent>
           </Select>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="sm" aria-label="设置">
+                <Settings data-icon="inline-start" />
+                设置
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuGroup>
+                <DropdownMenuCheckboxItem
+                  checked={appSettings?.autostart ?? false}
+                  disabled={!appSettings || settingsBusy}
+                  onCheckedChange={(enabled) => void updateSetting(api.setAutostart, enabled)}
+                >
+                  开机自启
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuCheckboxItem
+                  checked={appSettings?.closeToTray ?? true}
+                  disabled={!appSettings || settingsBusy}
+                  onCheckedChange={(enabled) => void updateSetting(api.setCloseToTray, enabled)}
+                >
+                  关闭窗口时最小化到托盘
+                </DropdownMenuCheckboxItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
             <RefreshCw className={cn(loading && "animate-spin")} />
             刷新
