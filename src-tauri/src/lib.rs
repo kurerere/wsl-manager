@@ -1,19 +1,25 @@
 mod wsl;
 mod cache_schedule;
+mod tray_status;
 
 use tauri::async_runtime::spawn_blocking;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
-use std::{path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use std::{path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, Instant}};
 use cache_schedule::{CacheSchedule, Schedule, Status};
 use serde::Serialize;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
+
+const TRAY_ID: &str = "main-tray";
 
 struct AppState {
     close_to_tray: AtomicBool,
     close_to_tray_path: PathBuf,
     window_visible: AtomicBool,
+    running_count: AtomicUsize,
+    tooltip_refreshing: AtomicBool,
+    last_tooltip: Mutex<String>,
 }
 
 #[derive(Serialize)]
@@ -31,8 +37,10 @@ async fn blocking<T: Send + 'static>(
 }
 
 #[tauri::command]
-async fn get_overview() -> Result<wsl::Overview, String> {
-    blocking(wsl::overview).await
+async fn get_overview(app: AppHandle) -> Result<wsl::Overview, String> {
+    let overview = blocking(wsl::overview).await?;
+    refresh_tray_tooltip(&app);
+    Ok(overview)
 }
 
 #[tauri::command]
@@ -43,15 +51,25 @@ async fn drop_caches(schedule: tauri::State<'_, Arc<CacheSchedule>>) -> Result<(
 
 fn release_caches(
     schedule: &CacheSchedule,
-    mut emit_status: impl FnMut(Status),
+    emit_status: impl FnMut(Status),
 ) -> Result<(), String> {
     if !schedule.state.lock().unwrap().begin(false, Instant::now()) {
         return Err("正在释放缓存，或没有运行中的发行版".into());
     }
-    emit_status(schedule.state.lock().unwrap().status());
+    release_started_caches(schedule, emit_status)
+}
+
+fn release_started_caches(
+    schedule: &CacheSchedule,
+    mut emit_status: impl FnMut(Status),
+) -> Result<(), String> {
+    let status = schedule.state.lock().unwrap().status();
+    emit_status(status);
     let result = wsl::drop_caches();
+    let _ = wsl::sample_vm_once();
     schedule.state.lock().unwrap().finish(result.clone(), Instant::now());
-    emit_status(schedule.state.lock().unwrap().status());
+    let status = schedule.state.lock().unwrap().status();
+    emit_status(status);
     result
 }
 
@@ -153,6 +171,49 @@ fn show_main_window(app: &AppHandle) {
     let _ = app.emit("window-visibility", true);
 }
 
+fn refresh_tray_tooltip(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let schedule = app.state::<Arc<CacheSchedule>>();
+    let status = schedule.state.lock().unwrap().status();
+    let text = tray_status::tooltip_text(
+        wsl::last_vm_sample().as_ref(),
+        state.running_count.load(Ordering::Relaxed),
+        &status,
+        Instant::now(),
+    );
+    let mut last = state.last_tooltip.lock().unwrap();
+    if *last == text {
+        return;
+    }
+    *last = text.clone();
+    drop(last);
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(text));
+    }
+}
+
+fn refresh_vm_sample_on_hover(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.running_count.load(Ordering::Relaxed) == 0
+        || wsl::last_vm_sample()
+            .is_some_and(|sample| sample.at.elapsed() <= Duration::from_secs(10))
+        || state
+            .tooltip_refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = wsl::sample_vm_once();
+        app.state::<AppState>()
+            .tooltip_refreshing
+            .store(false, Ordering::Release);
+        refresh_tray_tooltip(&app);
+    });
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let release = MenuItem::with_id(app, "release-caches", "立即释放缓存", true, None::<&str>)?;
@@ -163,7 +224,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         std::io::Error::other("默认窗口图标不可用")
     })?;
 
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .tooltip("WSL Manager")
         .menu(&menu)
@@ -175,23 +236,21 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 std::thread::spawn(move || {
                     let _ = release_caches(&schedule, |status| {
                         let _ = handle.emit("cache-schedule", status);
+                        refresh_tray_tooltip(&handle);
                     });
                 });
             }
             "quit" => app.exit(0),
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                }
-            ) {
-                show_main_window(tray.app_handle());
-            }
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Enter { .. } => refresh_vm_sample_on_hover(tray.app_handle()),
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } => show_main_window(tray.app_handle()),
+            _ => {}
         })
         .build(app)?;
     Ok(())
@@ -225,6 +284,9 @@ pub fn run() {
                 close_to_tray: AtomicBool::new(close_to_tray),
                 close_to_tray_path,
                 window_visible: AtomicBool::new(!autostart),
+                running_count: AtomicUsize::new(0),
+                tooltip_refreshing: AtomicBool::new(false),
+                last_tooltip: Mutex::new(String::new()),
             });
             setup_tray(app.handle())?;
             if !autostart {
@@ -235,17 +297,19 @@ pub fn run() {
                 let mut check_at = Instant::now();
                 loop {
                     if Instant::now() >= check_at {
-                        let available = !wsl::running_set().is_empty();
-                        schedule.state.lock().unwrap().available(available, Instant::now());
+                        let running = wsl::running_set();
+                        schedule.state.lock().unwrap().available(!running.is_empty(), Instant::now());
+                        handle.state::<AppState>().running_count.store(running.len(), Ordering::Relaxed);
                         check_at = Instant::now() + Duration::from_secs(5);
                     }
                     let started = schedule.state.lock().unwrap().begin(true, Instant::now());
                     if started {
-                        let _ = handle.emit("cache-schedule", schedule.state.lock().unwrap().status());
-                        let result = wsl::drop_caches();
-                        schedule.state.lock().unwrap().finish(result, Instant::now());
-                        let _ = handle.emit("cache-schedule", schedule.state.lock().unwrap().status());
+                        let _ = release_started_caches(&schedule, |status| {
+                            let _ = handle.emit("cache-schedule", status);
+                            refresh_tray_tooltip(&handle);
+                        });
                     }
+                    refresh_tray_tooltip(&handle);
                     std::thread::sleep(Duration::from_secs(1));
                 }
             });

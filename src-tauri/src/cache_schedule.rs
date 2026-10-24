@@ -14,12 +14,12 @@ pub struct Schedule {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
-    minutes: u32,
-    remaining: u64,
-    busy: bool,
-    waiting: bool,
-    completed: u64,
-    error: Option<String>,
+    pub(crate) minutes: u32,
+    pub(crate) remaining: u64,
+    pub(crate) busy: bool,
+    pub(crate) waiting: bool,
+    pub(crate) completed: u64,
+    pub(crate) error: Option<String>,
 }
 
 pub struct CacheSchedule {

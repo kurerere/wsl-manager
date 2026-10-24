@@ -59,6 +59,16 @@ pub struct VmStats {
     pub mem_cache: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VmSample {
+    pub at: Instant,
+    pub total: u64,
+    pub free: u64,
+    pub cache: u64,
+}
+
+static LAST_VM: LazyLock<Mutex<Option<VmSample>>> = LazyLock::new(|| Mutex::new(None));
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct HostMemory {
@@ -419,6 +429,42 @@ fn parse_snapshot(lines: &[String]) -> Result<Snapshot, String> {
     })
 }
 
+fn vm_sample_from_meminfo(lines: &[&str]) -> VmSample {
+    VmSample {
+        at: Instant::now(),
+        total: meminfo_kb(lines, "MemTotal") * 1024,
+        free: meminfo_kb(lines, "MemFree") * 1024,
+        cache: (meminfo_kb(lines, "Buffers")
+            + meminfo_kb(lines, "Cached")
+            + meminfo_kb(lines, "SReclaimable"))
+            * 1024,
+    }
+}
+
+pub(crate) fn last_vm_sample() -> Option<VmSample> {
+    *LAST_VM.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub fn sample_vm_once() -> Option<VmSample> {
+    let running = running_set();
+    let name = list_entries()
+        .into_iter()
+        .map(|entry| entry.name)
+        .find(|name| running.contains(name))?;
+    let output = run_wsl(&[
+        "--distribution",
+        &name,
+        "--exec",
+        "cat",
+        "/proc/meminfo",
+    ])
+    .ok()?;
+    let lines: Vec<_> = output.lines().collect();
+    let sample = vm_sample_from_meminfo(&lines);
+    *LAST_VM.lock().unwrap_or_else(|e| e.into_inner()) = Some(sample);
+    Some(sample)
+}
+
 /// 由前后两次快照计算统计数据
 fn compute(prev: &Snapshot, cur: &Snapshot, cores: u32, page_size: u64) -> (DistroStats, VmStats) {
     let dt = cur.cpu_total.saturating_sub(prev.cpu_total).max(1) as f64;
@@ -679,6 +725,14 @@ pub fn overview() -> Result<Overview, String> {
         })
         .collect();
 
+    if let Some(vm) = &vm {
+        *LAST_VM.lock().unwrap_or_else(|e| e.into_inner()) = Some(VmSample {
+            at: Instant::now(),
+            total: vm.mem_total,
+            free: vm.mem_free,
+            cache: vm.mem_cache,
+        });
+    }
     Ok(Overview { distros, vm, host: host_memory() })
 }
 
@@ -834,4 +888,5 @@ mod tests {
     fn ignores_plain_archive_attribute_for_compaction() {
         assert_eq!(compact_blocker("AlpineStore", 0x20), None);
     }
+
 }
